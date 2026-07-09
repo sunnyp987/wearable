@@ -51,16 +51,13 @@ final class WhoopScoringOrchestrator {
             for metric in history {
                 guard let date = Self.dayFormatter.date(from: metric.day) else { continue }
                 if let hrv = metric.avgHrv {
-                    // BaselineEngine's history array is built for per-night RR pools,
-                    // not a single pre-averaged number. A direct seed hook is the clean
-                    // fix here — flagging as a small follow-up rather than reverse-
-                    // engineering RR values out of an already-averaged HRV number.
-                    _ = (date, hrv)
+                    baseline.seedHRV(date: date, rmssd: hrv)
                 }
                 if let rhr = metric.restingHr {
-                    _ = (date, rhr)
+                    baseline.seedRestingHR(date: date, bpm: Double(rhr))
                 }
             }
+            if let rhr = baseline.rhrBaseline { todayRestingHR = rhr }
         } catch {
             print("WhoopScoringOrchestrator: no prior baseline history (\(error)) — starting fresh")
         }

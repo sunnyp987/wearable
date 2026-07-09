@@ -80,6 +80,21 @@ final class BaselineEngine {
         prune(&hrvHistory)
     }
 
+    /// Directly seed a pre-computed RMSSD value — for restoring baseline
+    /// history from a cache where only the already-averaged HRV number was
+    /// persisted (not the raw RR intervals it was computed from). Use this
+    /// on app-launch restore; use recordNightlyHRV for a fresh computation.
+    func seedHRV(date: Date, rmssd: Double) {
+        hrvHistory.append((date, rmssd))
+        prune(&hrvHistory)
+    }
+
+    /// Directly seed a pre-computed resting HR value, same rationale as seedHRV.
+    func seedRestingHR(date: Date, bpm: Double) {
+        rhrHistory.append((date, bpm))
+        prune(&rhrHistory)
+    }
+
     func recordRestingHR(date: Date, overnightHRSamples: [ScoringHRSample]) {
         guard !overnightHRSamples.isEmpty else { return }
         // RHR = lowest sustained HR overnight; approximate with 10th percentile
