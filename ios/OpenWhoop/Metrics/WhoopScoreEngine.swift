@@ -61,21 +61,37 @@ final class BaselineEngine {
 
     /// Root Mean Square of Successive Differences — the standard HRV metric
     /// Whoop and most wearables use (captured overnight for stability).
-    static func rmssd(fromRRIntervalsMs rr: [Double]) -> Double? {
-        guard rr.count > 1 else { return nil }
+    ///
+    /// FIXED: previously took one flat, chronologically-sorted array of RR values
+    /// pooled across an entire night. Historical records only log up to 4 TRULY
+    /// consecutive beats each (sharing one record's single timestamp), with real
+    /// time gaps between separate records. Treating the pooled array as one
+    /// continuous sequence computed successive differences ACROSS record
+    /// boundaries — comparing beats that were never actually adjacent — which
+    /// massively inflated RMSSD (observed in practice: 447ms, when a normal
+    /// resting RMSSD is roughly 20-100ms). The fix takes separate "runs" (one
+    /// per originating record) and only computes successive differences WITHIN
+    /// each run, combining the sum-of-squared-diffs and counts across all runs.
+    static func rmssd(fromRRRuns runs: [[Double]]) -> Double? {
         var sumSquaredDiffs = 0.0
-        for i in 1..<rr.count {
-            let diff = rr[i] - rr[i - 1]
-            sumSquaredDiffs += diff * diff
+        var diffCount = 0
+        for run in runs where run.count > 1 {
+            for i in 1..<run.count {
+                let diff = run[i] - run[i - 1]
+                sumSquaredDiffs += diff * diff
+                diffCount += 1
+            }
         }
-        let meanSquaredDiff = sumSquaredDiffs / Double(rr.count - 1)
-        return sqrt(meanSquaredDiff)
+        guard diffCount > 0 else { return nil }
+        return sqrt(sumSquaredDiffs / Double(diffCount))
     }
 
-    /// Feed in last night's overnight HRV sample (most stable window, mirrors
+    /// Feed in last night's overnight HRV runs (most stable window, mirrors
     /// how Whoop captures HRV primarily during sleep rather than all day).
-    func recordNightlyHRV(date: Date, rrIntervalsMs: [Double]) {
-        guard let rmssd = Self.rmssd(fromRRIntervalsMs: rrIntervalsMs) else { return }
+    /// `rrRuns`: one inner array per originating record's consecutive beats —
+    /// see WhoopDataAdapter.rrRuns(from:).
+    func recordNightlyHRV(date: Date, rrRuns: [[Double]]) {
+        guard let rmssd = Self.rmssd(fromRRRuns: rrRuns) else { return }
         hrvHistory.append((date, rmssd))
         prune(&hrvHistory)
     }

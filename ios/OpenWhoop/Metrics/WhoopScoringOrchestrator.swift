@@ -105,17 +105,24 @@ final class WhoopScoringOrchestrator {
             let rrFromTs = Int(sleepWindow.start.timeIntervalSince1970)
             let rrToTs = Int(sleepWindow.end.timeIntervalSince1970)
             let rrRows = try await store.rrIntervals(deviceId: deviceId, from: rrFromTs, to: rrToTs, limit: 200_000)
-            let rrPool = WhoopDataAdapter.rrIntervalsMs(from: rrRows)
-            baseline.recordNightlyHRV(date: now, rrIntervalsMs: rrPool)
+            let rrRuns = WhoopDataAdapter.rrRuns(from: rrRows)
+            baseline.recordNightlyHRV(date: now, rrRuns: rrRuns)
 
             let overnightHR = hrSamples.filter { $0.timestamp >= sleepWindow.start && $0.timestamp <= sleepWindow.end }
             baseline.recordRestingHR(date: now, overnightHRSamples: overnightHR)
             if let rhr = baseline.rhrBaseline { todayRestingHR = rhr }
 
+            // FIX: motionEpochs previously spanned the full 17h scan window while
+            // overnightHR was already filtered to just the sleep window — a length
+            // mismatch that tripped SleepStageClassifier's alignment guard and
+            // silently returned an empty result (0m sleep, recovery=0 every time).
+            let overnightMotion = motionEpochs.filter { $0.start >= sleepWindow.start && $0.start <= sleepWindow.end }
+
             let staged = SleepStageClassifier.classify(
-                motionEpochs: motionEpochs,
-                hrEpochs: overnightHR,
-                hrvEpochs: overnightHR.map { _ in nil }
+                windowStart: sleepWindow.start,
+                windowEnd: sleepWindow.end,
+                motionEpochs: overnightMotion,
+                hrEpochs: overnightHR
             )
             let summary = SleepStageClassifier.summarize(staged)
 

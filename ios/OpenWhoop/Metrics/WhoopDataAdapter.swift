@@ -19,10 +19,24 @@ struct WhoopDataAdapter {
         samples.map { ScoringHRSample(timestamp: Date(timeIntervalSince1970: Double($0.ts)), bpm: Double($0.bpm)) }
     }
 
-    /// Pool RR intervals (already flattened, one row per beat) into plain
-    /// millisecond values for BaselineEngine.rmssd. Chronological order matters.
-    static func rrIntervalsMs(from intervals: [RRInterval]) -> [Double] {
-        intervals.sorted { $0.ts < $1.ts }.map { Double($0.rrMs) }
+    /// Group RR intervals by their originating record (all RR values from one
+    /// HISTORICAL_DATA record share that record's single `ts` field — see
+    /// HistoricalStreams.swift). Each returned inner array is one record's
+    /// truly-consecutive beats; separate records are NEVER treated as adjacent,
+    /// preventing the RMSSD cross-record contamination bug (447ms result before
+    /// this fix, vs a normal ~20-100ms). Order within a group reflects
+    /// WhoopStore's query order (ts ASC, rrMs ASC) — a minor secondary
+    /// imprecision (true recording order isn't preserved within a ≤4-value
+    /// group) but far smaller in effect than the cross-record bug this fixes.
+    static func rrRuns(from intervals: [RRInterval]) -> [[Double]] {
+        let sorted = intervals.sorted { $0.ts < $1.ts }
+        var groups: [Int: [Double]] = [:]
+        var order: [Int] = []
+        for interval in sorted {
+            if groups[interval.ts] == nil { order.append(interval.ts) }
+            groups[interval.ts, default: []].append(Double(interval.rrMs))
+        }
+        return order.map { groups[$0] ?? [] }
     }
 
     /// Motion epochs derived from consecutive gravity-vector deltas.
