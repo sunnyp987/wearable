@@ -12,6 +12,7 @@
 
 import Foundation
 import WhoopProtocol
+import WhoopStore
 
 @MainActor
 final class WhoopScoringOrchestrator {
