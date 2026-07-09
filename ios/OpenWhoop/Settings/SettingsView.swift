@@ -56,7 +56,9 @@ enum ProfileUnits {
 
 // MARK: - Local persistence
 
-private enum ProfileStorage {
+// Not private: WhoopScoringOrchestrator reads the locally-saved age (via .load()) to
+// personalize its HRmax estimate (Tanaka formula) without requiring a server round-trip.
+enum ProfileStorage {
     static let key = "com.openwhoop.profile.v1"
 
     static func load() -> Profile? {
