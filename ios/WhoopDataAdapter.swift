@@ -69,28 +69,31 @@ struct WhoopDataAdapter {
         return epochs
     }
 
-    /// PLACEHOLDER — needs PostHooks.swift to know the real key name.
-    /// Once known, this should read frame.parsed["<rr_key>"]?.intArrayValue,
-    /// convert each int to milliseconds per the schema's units, and return them.
+    /// Confirmed via PostHooks.swift: RR intervals surface under "rr_intervals"
+    /// as an intArray, in milliseconds. NOTE: capped at 4 values per
+    /// HISTORICAL_DATA record (min(rrn, 4) in the decoder), so any single
+    /// record's RR list is sparse — always pool across a full night's worth
+    /// of records before computing RMSSD, never compute it per-record.
     static func extractRRIntervals(from frame: ParsedFrame) -> [Double]? {
-        // TODO: replace "rr_intervals" with the actual key once PostHooks.swift
-        // is available. Common alternatives to check for: "rr", "rr_ms", "ibi".
-        guard let arr = frame.parsed["rr_intervals"]?.intArrayValue else { return nil }
+        guard let arr = frame.parsed["rr_intervals"]?.intArrayValue, !arr.isEmpty else { return nil }
         return arr.map { Double($0) }
     }
 
-    /// Convenience: build nightly HRV samples for BaselineEngine, for records
-    /// falling within a given overnight window.
+    /// Build nightly HRV samples for BaselineEngine by pooling RR intervals
+    /// from every HISTORICAL_DATA record in the overnight window — this is
+    /// the correct granularity given the 4-per-record cap above.
     static func hrvSamples(fromHistoricalFrames frames: [ParsedFrame], night: (start: Date, end: Date)) -> [Double] {
         frames
             .filter { $0.typeName == "HISTORICAL_DATA" }
-            .compactMap { frame -> [Double]? in
+            .compactMap { frame -> (Date, [Double])? in
                 guard let unix = frame.parsed["unix"]?.intValue else { return nil }
                 let t = Date(timeIntervalSince1970: Double(unix))
                 guard t >= night.start && t <= night.end else { return nil }
-                return extractRRIntervals(from: frame)
+                guard let rr = extractRRIntervals(from: frame) else { return nil }
+                return (t, rr)
             }
-            .flatMap { $0 }
+            .sorted { $0.0 < $1.0 }  // chronological pooling order matters for RMSSD
+            .flatMap { $0.1 }
     }
 
     /// Wrist-on/off events (from EVENT frames) — useful for trimming HR/motion
