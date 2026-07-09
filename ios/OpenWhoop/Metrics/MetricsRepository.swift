@@ -234,41 +234,44 @@ final class MetricsRepository: ObservableObject {
 
     // MARK: - Workouts (M5)
 
+    /// Fetches workout bouts for the given date range. Prefers server-computed workouts
+    /// (/v1/workouts) when a server is configured and it actually has data; otherwise falls
+    /// back to on-device detection from the raw HR stream (WorkoutDetector), which needs no
+    /// server at all — the local-first path most installs of this app are actually running.
+    /// Previously this only ever called serverSync, so with no server configured the Workouts
+    /// tab was permanently empty no matter how much real HR data was on the phone.
     func workouts(from: String, to: String) async -> [Workout] {
         await ensureOpen()
-        guard let store else { return [] }
+        if let serverSync {
+            let remote = await serverSync.getWorkouts(from: from, to: to)
+            if !remote.isEmpty { return remote }
+        }
+        return await localWorkouts(from: from, to: to)
+    }
 
-        // Convert the YYYY-MM-DD day-string range into epoch bounds (UTC), matching
-        // the day-key convention used elsewhere (e.g. WhoopScoringOrchestrator).
+    private func localWorkouts(from: String, to: String) async -> [Workout] {
+        guard let store, let orchestrator else { return [] }
+
         let fmt = DateFormatter()
         fmt.calendar = Calendar(identifier: .gregorian)
         fmt.timeZone = TimeZone(identifier: "UTC")
         fmt.dateFormat = "yyyy-MM-dd"
-        guard let fromDate = fmt.date(from: from),
-              let toDateStart = fmt.date(from: to),
-              let toDate = Calendar(identifier: .gregorian).date(byAdding: .day, value: 1, to: toDateStart)
-        else { return [] }
+        guard let fromDate = fmt.date(from: from), let toDate = fmt.date(from: to) else { return [] }
 
         let fromTs = Int(fromDate.timeIntervalSince1970)
-        let toTs = Int(toDate.timeIntervalSince1970)
+        let toTs = Int(toDate.timeIntervalSince1970) + 86_400   // inclusive of the `to` day
+        guard let hrRows = try? await store.hrSamples(deviceId: deviceId, from: fromTs, to: toTs, limit: 500_000),
+              !hrRows.isEmpty else { return [] }
 
-        let hrRows = (try? await store.hrSamples(deviceId: deviceId, from: fromTs, to: toTs, limit: 500_000)) ?? []
         let hrSamples = WhoopDataAdapter.scoringHRSamples(from: hrRows)
-
-        let restingHR = orchestrator?.currentRestingHR ?? 55
-        let maxHR = orchestrator?.currentMaxHR ?? 190
-        let localWorkouts = WorkoutDetector.detect(
-            hrSamples: hrSamples, deviceId: deviceId, restingHR: restingHR, maxHR: maxHR
+        let workouts = WorkoutDetector.detect(
+            hrSamples: hrSamples,
+            restingHR: orchestrator.currentRestingHR,
+            maxHR: orchestrator.currentMaxHR,
+            deviceId: deviceId,
+            hrmaxSource: "formula"
         )
-
-        // Merge with server-detected workouts if a server happens to be configured
-        // (harmless no-op otherwise) — local-first union by id, since local detection
-        // is always available and the server path may not be.
-        let serverWorkouts = await serverSync?.getWorkouts(from: from, to: to) ?? []
-        var byId: [String: Workout] = [:]
-        for w in localWorkouts { byId[w.id] = w }
-        for w in serverWorkouts where byId[w.id] == nil { byId[w.id] = w }
-        return byId.values.sorted { $0.startTs < $1.startTs }
+        return workouts.sorted { $0.startTs > $1.startTs }   // newest first, matching the server path
     }
 
     // MARK: - Workout calorie backfill (M7)

@@ -1,136 +1,131 @@
 //
 //  WorkoutDetector.swift
-//  Drop into ios/OpenWhoop/Metrics/ alongside the other scoring files.
+//  On-device workout auto-detection from the raw HR stream.
 //
-//  Fully local, on-device workout auto-detection — no server required. Scans
-//  a day's HR samples for sustained bouts of elevated heart rate and produces
-//  `Workout` records matching the exact shape ServerSync.getWorkouts() would
-//  have returned, so WorkoutsView/WorkoutDetailView need ZERO changes.
+//  BACKGROUND: WorkoutsView / MetricsRepository.workouts() originally only read from
+//  ServerSync.getWorkouts(), i.e. GET /v1/workouts on the optional self-hosted server. With
+//  no server configured (the common case for a purely local install — README frames the
+//  server as optional), MetricsRepository.workouts() always returned [], so the Workouts tab
+//  was permanently empty regardless of how much real activity data was on the phone. Sleep and
+//  Strain already have on-device computation (WhoopScoringOrchestrator); this gives Workouts
+//  the same local-first treatment, mirroring WHOOP's own auto-detection: a workout is a
+//  sustained period of elevated heart-rate-reserve.
 //
-//  METHOD: a bout is a contiguous run where HR stays at or above a %-of-heart-
-//  -rate-reserve threshold for at least a minimum duration, tolerating brief
-//  dips (e.g. a red light, a pause) without ending the bout. This mirrors the
-//  spirit of Whoop's own auto-detected-activity approach, at a much simpler
-//  level — it will not distinguish activity TYPE (run vs bike vs walk), only
-//  "there was a sustained elevated-effort period here."
+//  METHOD: Karvonen %HRR (heart-rate reserve) zones, same basis StrainScorer already uses.
+//  A bout is a maximal run of samples at zone >= 2 (>=60% HRR), bridging gaps up to
+//  `mergeGapSeconds` so interval efforts (e.g. run/walk intervals) aren't split into many
+//  tiny bouts, and requiring at least `minActiveMinutes` of total span to filter out brief
+//  HR spikes (stairs, a single flight, etc.) that aren't real workouts.
 //
-//  KNOWN LIMITATIONS (be upfront about these, don't overclaim):
-//  - No activity-type classification — `kind` is always "Activity".
-//  - No calorie estimate — that needs body profile (weight/age/sex) wiring
-//    this file doesn't have access to; caloriesKcal/Kj are always nil.
-//  - hrmax is an ESTIMATE (passed in, e.g. 220-age), not a measured max —
-//    hrmaxSource reflects that honestly.
-//  - Zone boundaries use a standard 5-zone %HRR scheme (widely used, but not
-//    necessarily identical to WHOOP's own proprietary zone definitions).
+//  CAVEATS: no calorie model is calibrated against ground truth here, so caloriesKcal/Kj are
+//  always nil (same "—" treatment the UI already gives null calories from the server path).
+//  `kind` (activity type) is always nil — WHOOP's activity classifier isn't reproduced.
 //
 
 import Foundation
-import WhoopProtocol
 
 struct WorkoutDetector {
 
-    /// Minimum sustained duration for a bout to count as a workout (seconds).
-    /// 8 minutes filters out brief errands/stair climbs while still catching
-    /// short but real training sessions.
-    static let minBoutSeconds: TimeInterval = 8 * 60
+    static let minActiveMinutes: Double = 6
+    static let mergeGapSeconds: TimeInterval = 4 * 60
 
-    /// Minimum %HRR to count as "elevated effort" — roughly Zone 2+.
-    static let elevatedHRRThreshold: Double = 0.40
+    /// Karvonen %HRR zone boundaries for zones 0...5 (upper-bound exclusive), matching the
+    /// zone labels WorkoutDetailView already renders (Rest/Very Light/Light/Moderate/Hard/Max).
+    private static let zoneBoundaries: [Double] = [0.0, 0.50, 0.60, 0.70, 0.80, 0.90, 1.01]
 
-    /// How long a dip below threshold is tolerated before ending a bout
-    /// (brief pauses, red lights, rest between sets).
-    static let toleranceGapSeconds: TimeInterval = 90
+    private static func zone(forHRRFraction f: Double) -> Int {
+        for i in 0..<(zoneBoundaries.count - 1) {
+            if f >= zoneBoundaries[i] && f < zoneBoundaries[i + 1] { return i }
+        }
+        return f >= zoneBoundaries[zoneBoundaries.count - 1] ? 5 : 0
+    }
 
-    /// Detect workouts from a day's (or any range's) HR samples.
+    /// Detect workout bouts from a (not-necessarily-sorted) HR sample series over some range.
     static func detect(
         hrSamples: [ScoringHRSample],
-        deviceId: String,
         restingHR: Double,
-        maxHR: Double
+        maxHR: Double,
+        deviceId: String,
+        hrmaxSource: String
     ) -> [Workout] {
-        guard maxHR > restingHR else { return [] }
+        let reserve = max(maxHR - restingHR, 1)
         let sorted = hrSamples.sorted { $0.timestamp < $1.timestamp }
-        guard !sorted.isEmpty else { return [] }
+        guard sorted.count > 1 else { return [] }
 
-        func hrrFraction(_ bpm: Double) -> Double {
-            max(0, min(1, (bpm - restingHR) / (maxHR - restingHR)))
+        struct Point { let ts: Date; let bpm: Double; let frac: Double }
+        let points = sorted.map { s in
+            Point(ts: s.timestamp, bpm: s.bpm, frac: (s.bpm - restingHR) / reserve)
         }
 
-        var workouts: [Workout] = []
-        var boutSamples: [ScoringHRSample] = []
-        var lastElevatedAt: Date? = nil
+        // Group into candidate bouts: consecutive elevated (zone >= 2) samples, bridging
+        // short non-elevated gaps so a brief rest interval doesn't split one workout in two.
+        var bouts: [[Point]] = []
+        var current: [Point] = []
+        var lastElevatedTs: Date? = nil
 
-        func closeBoutIfValid() {
-            defer { boutSamples = []; lastElevatedAt = nil }
-            guard let first = boutSamples.first?.timestamp,
-                  let last = boutSamples.last?.timestamp,
-                  last.timeIntervalSince(first) >= minBoutSeconds else { return }
-
-            let bpmValues = boutSamples.map { $0.bpm }
-            let avgHr = bpmValues.reduce(0, +) / Double(bpmValues.count)
-            let peakHr = Int(bpmValues.max() ?? avgHr)
-            let durationS = Int(last.timeIntervalSince(first))
-
-            let avgHrrPct = hrrFraction(avgHr) * 100
-
-            // 5-zone %HRR scheme (standard, not necessarily WHOOP's exact proprietary
-            // boundaries): Z1 <50%, Z2 50-60%, Z3 60-70%, Z4 70-80%, Z5 80%+.
-            var zoneSeconds: [Int: Double] = [0: 0, 1: 0, 2: 0, 3: 0, 4: 0, 5: 0]
-            for i in 1..<boutSamples.count {
-                let dt = boutSamples[i].timestamp.timeIntervalSince(boutSamples[i - 1].timestamp)
-                let frac = hrrFraction(boutSamples[i].bpm)
-                let zone: Int
-                switch frac {
-                case ..<0.40: zone = 1
-                case 0.40..<0.50: zone = 2
-                case 0.50..<0.60: zone = 3
-                case 0.60..<0.70: zone = 4
-                default: zone = 5
+        for p in points {
+            let elevated = p.frac >= zoneBoundaries[2]
+            if elevated {
+                if let last = lastElevatedTs, p.ts.timeIntervalSince(last) > mergeGapSeconds, !current.isEmpty {
+                    bouts.append(current)
+                    current = []
                 }
-                zoneSeconds[zone, default: 0] += dt
+                current.append(p)
+                lastElevatedTs = p.ts
+            } else if !current.isEmpty, let last = lastElevatedTs, p.ts.timeIntervalSince(last) <= mergeGapSeconds {
+                current.append(p)   // bridge: keep the bout open through a short rest interval
+            } else if !current.isEmpty {
+                bouts.append(current)
+                current = []
+            }
+        }
+        if !current.isEmpty { bouts.append(current) }
+
+        return bouts.compactMap { bout -> Workout? in
+            guard let start = bout.first?.ts, let end = bout.last?.ts else { return nil }
+            let durationS = Int(end.timeIntervalSince(start))
+            guard Double(durationS) / 60.0 >= minActiveMinutes else { return nil }
+
+            let bpms = bout.map { $0.bpm }
+            let avgHr = bpms.reduce(0, +) / Double(bpms.count)
+            let peakHr = Int(bpms.max() ?? avgHr)
+            let avgFrac = bout.map { $0.frac }.reduce(0, +) / Double(bout.count)
+
+            // Zone time %, weighted by the gap to the next sample (not just a per-sample count)
+            // so sparsely/densely logged stretches don't skew the split.
+            var zoneSeconds = [Int: Double]()
+            for i in 0..<bout.count {
+                let dt: Double
+                if i + 1 < bout.count { dt = max(0, bout[i + 1].ts.timeIntervalSince(bout[i].ts)) }
+                else { dt = i > 0 ? max(0, bout[i].ts.timeIntervalSince(bout[i - 1].ts)) : 1 }
+                zoneSeconds[zone(forHRRFraction: bout[i].frac), default: 0] += dt
             }
             let totalZoneSeconds = zoneSeconds.values.reduce(0, +)
-            let zoneTimePct: [Int: Double] = totalZoneSeconds > 0
-                ? zoneSeconds.mapValues { ($0 / totalZoneSeconds) * 100 }
-                : [:]
+            var zonePct: [Int: Double] = [:]
+            if totalZoneSeconds > 0 {
+                for (z, secs) in zoneSeconds { zonePct[z] = secs / totalZoneSeconds * 100 }
+            }
 
-            let startTs = Int(first.timeIntervalSince1970)
-            workouts.append(Workout(
-                id: "\(deviceId)|\(startTs)",
+            let boutSamples = bout.map { ScoringHRSample(timestamp: $0.ts, bpm: $0.bpm) }
+            let strain = StrainScorer.dailyStrain(hrSamples: boutSamples, restingHR: restingHR, maxHR: maxHR)
+
+            return Workout(
+                id: "\(deviceId)|\(Int(start.timeIntervalSince1970))",
                 deviceId: deviceId,
-                startTs: startTs,
-                endTs: Int(last.timeIntervalSince1970),
+                startTs: Int(start.timeIntervalSince1970),
+                endTs: Int(end.timeIntervalSince1970),
                 avgHr: avgHr,
                 peakHr: peakHr,
-                strain: StrainScorer.dailyStrain(hrSamples: boutSamples, restingHR: restingHR, maxHR: maxHR),
-                kind: "Activity",   // no activity-type classification available locally
+                strain: strain,
+                kind: nil,
                 durationS: durationS,
-                zoneTimePct: zoneTimePct,
-                avgHrrPct: avgHrrPct,
+                zoneTimePct: zonePct,
+                avgHrrPct: avgFrac * 100,
                 hrmax: maxHR,
-                hrmaxSource: "estimated",  // not a measured max — see file header
-                caloriesKcal: nil,          // needs body profile wiring; not available here
+                hrmaxSource: hrmaxSource,
+                caloriesKcal: nil,
                 caloriesKj: nil
-            ))
+            )
         }
-
-        for sample in sorted {
-            let elevated = hrrFraction(sample.bpm) >= elevatedHRRThreshold
-            if elevated {
-                boutSamples.append(sample)
-                lastElevatedAt = sample.timestamp
-            } else if let lastElevated = lastElevatedAt {
-                if sample.timestamp.timeIntervalSince(lastElevated) > toleranceGapSeconds {
-                    closeBoutIfValid()
-                } else {
-                    // Within tolerance — keep the bout open, include this
-                    // lower sample so duration/avg reflect the brief dip.
-                    boutSamples.append(sample)
-                }
-            }
-        }
-        closeBoutIfValid()  // flush any bout still open at the end of the range
-
-        return workouts
     }
 }

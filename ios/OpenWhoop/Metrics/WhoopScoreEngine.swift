@@ -170,6 +170,7 @@ struct RecoveryScorer {
     /// so the composite is scale-free.
     static func score(
         todayHRVRmssd: Double?,
+        todayRestingHR: Double?,
         baseline: BaselineEngine,
         lastNightSleep: SleepSession?
     ) -> RecoveryResult {
@@ -190,7 +191,11 @@ struct RecoveryScorer {
         }
 
         // --- RHR component (weight 0.3) — lower RHR than baseline = better ---
-        if let today = lastNightSleep != nil ? todayRestingHR(from: lastNightSleep!) : nil,
+        // FIXED: this used to derive "today's" resting HR via a placeholder hook that
+        // always returned nil, so the RHR component silently never contributed — recovery
+        // was computed from HRV + sleep only despite the weights below implying otherwise.
+        // The caller now passes the actual overnight RHR it just computed.
+        if let today = todayRestingHR,
            let mean = baseline.rhrBaseline {
             let dev = today - mean
             rhrDevBpm = dev
@@ -216,12 +221,6 @@ struct RecoveryScorer {
         let band: RecoveryBand = pct >= 67 ? .green : (pct >= 34 ? .yellow : .red)
 
         return RecoveryResult(percentage: pct, band: band, hrvDeviationSD: hrvDevSD, rhrDeviationBpm: rhrDevBpm)
-    }
-
-    private static func todayRestingHR(from sleep: SleepSession) -> Double? {
-        // Placeholder hook — wire this to the overnight HR percentile calc
-        // (same logic as BaselineEngine.recordRestingHR) for the most recent night.
-        return nil
     }
 
     private static func clamp(_ v: Double, _ lo: Double, _ hi: Double) -> Double {
