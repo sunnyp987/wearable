@@ -24,12 +24,12 @@ import Foundation
 
 // MARK: - Input types (map these from OpenWhoop's decoded records)
 
-struct HRVSample {
-    let timestamp: Date
-    let rrIntervalsMs: [Double]   // beat-to-beat intervals during the sample window
-}
-
-struct HRSample {
+// NOTE: prefixed "Scoring" because WhoopProtocol (via WhoopStore's Reads.swift)
+// already declares its own HRSample/RRInterval/GravitySample/WhoopEvent types
+// with a different shape (ts: Int unix-seconds instead of Date). These are
+// the scoring engine's own internal types — WhoopDataAdapter converts between
+// the two, so this file never needs to import WhoopProtocol at all.
+struct ScoringHRSample {
     let timestamp: Date
     let bpm: Double
 }
@@ -80,7 +80,7 @@ final class BaselineEngine {
         prune(&hrvHistory)
     }
 
-    func recordRestingHR(date: Date, overnightHRSamples: [HRSample]) {
+    func recordRestingHR(date: Date, overnightHRSamples: [ScoringHRSample]) {
         guard !overnightHRSamples.isEmpty else { return }
         // RHR = lowest sustained HR overnight; approximate with 10th percentile
         // rather than absolute min, to avoid single-sample sensor noise.
@@ -215,7 +215,7 @@ struct StrainScorer {
     }
 
     /// Accumulate instantaneous loads across a day's HR samples into a 0-21 score.
-    static func dailyStrain(hrSamples: [HRSample], restingHR: Double, maxHR: Double, sampleIntervalSeconds: Double = 1.0) -> Double {
+    static func dailyStrain(hrSamples: [ScoringHRSample], restingHR: Double, maxHR: Double, sampleIntervalSeconds: Double = 1.0) -> Double {
         guard !hrSamples.isEmpty else { return 0 }
         var cumulativeLoad = 0.0
         for sample in hrSamples {

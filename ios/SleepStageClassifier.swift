@@ -46,7 +46,7 @@ struct SleepStageClassifier {
     /// to the same 30-second grid (same start times, same count).
     static func classify(
         motionEpochs: [MotionEpoch],
-        hrEpochs: [HRSample],           // one representative/mean bpm per epoch
+        hrEpochs: [ScoringHRSample],           // one representative/mean bpm per epoch
         hrvEpochs: [Double?]            // per-epoch RMSSD if available, else nil
     ) -> [StagedEpoch] {
 
