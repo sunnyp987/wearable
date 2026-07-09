@@ -7,13 +7,16 @@ on:
 
 jobs:
   build:
-    runs-on: macos-14
+    runs-on: macos-15
     steps:
       - name: Checkout
         uses: actions/checkout@v4
 
-      - name: Select Xcode
-        run: sudo xcode-select -s /Applications/Xcode_15.4.app
+      - name: Show available Xcode versions (diagnostic)
+        run: ls /Applications | grep Xcode
+
+      - name: Select latest available Xcode
+        run: sudo xcode-select -s /Applications/Xcode.app && xcodebuild -version
 
       - name: Install XcodeGen
         run: brew install xcodegen
