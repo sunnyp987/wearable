@@ -752,8 +752,12 @@ extension BLEManager: CBPeripheralDelegate {
                 self.clockRequested = true
                 self.send(.getClock, payload: [])   // the strap expects GET_CLOCK with an EMPTY payload;
                                                // the app's old default [0x00] is a wrong length the strap ignores.
-                                               // (Offload no longer depends on this — Backfiller falls back to an
-                                               // identity clockRef — but a real correlation helps realtime decode.)
+                                               // Diagnostic logging confirmed this particular strap's firmware
+                                               // never answers GET_CLOCK at all (consistent across multiple
+                                               // fresh connections). Once clockRequested is true and no real
+                                               // correlation lands, the frame-processing loop below anchors a
+                                               // fallback clockRef from the first live REALTIME_DATA frame's
+                                               // own timestamp field instead of waiting forever.
             }
         }
         DispatchQueue.main.asyncAfter(deadline: .now() + 0.60) { [weak self] in
@@ -846,6 +850,22 @@ extension BLEManager: CBPeripheralDelegate {
                             log("Clock drift detected — issuing SET_CLOCK")
                             send(.setClock, payload: BLEManager.setClockPayload())
                         }
+                    } else if clockRequested, parsed.typeName == "REALTIME_DATA",
+                              let deviceTs = parsed.parsed["timestamp"]?.intValue {
+                        // FIX: the previous fallback assumed device==wall==now, which is wrong unless
+                        // the strap's internal counter happens to already equal real unix time (it
+                        // almost certainly doesn't — it's a monotonic tick counter with its own base).
+                        // That produced a garbage near-1970 timestamp on every stored sample, which is
+                        // why the count barely moved even after the "fix." The CORRECT fallback anchors
+                        // to an actual live frame: pair THIS frame's own raw device timestamp field
+                        // with the real wall-clock instant we received it. That's a genuine, valid
+                        // correlation point — every frame after this one converts correctly relative
+                        // to it, exactly the same as if GET_CLOCK had actually answered.
+                        let ref = ClockRef(device: deviceTs, wall: Int(Date().timeIntervalSince1970))
+                        clockRef = ref
+                        collector?.clockRef = ref
+                        backfiller?.clockRef = ref
+                        log("GET_CLOCK never answered — anchored fallback clockRef from live frame: device=\(ref.device) wall=\(ref.wall)")
                     }
                 }
                 if backfilling {
