@@ -79,10 +79,14 @@ struct SleepStageClassifier {
             hrBins[idx].append(h.bpm)
         }
 
-        // Reduce each bin to a representative value: sum for motion (total
-        // jostling in the window), mean for HR. Empty bins are gap-filled from
-        // their nearest non-empty neighbor rather than becoming a hard hole.
-        let motionValues = fillGaps(motionBins.map { $0.isEmpty ? nil : $0.reduce(0, +) })
+        // Reduce each bin to a representative value: MEAN for both signals.
+        // (Motion previously used sum-per-bin, which is oversensitive when
+        // historical records are logged sparsely — a single incidental motion
+        // reading in an otherwise-empty 30s bin could look like "awake" activity
+        // even during genuine stillness, misclassifying whole nights as awake.
+        // Mean keeps the value comparable regardless of how many raw samples
+        // happened to land in a given bin.)
+        let motionValues = fillGaps(motionBins.map { $0.isEmpty ? nil : $0.reduce(0, +) / Double($0.count) })
         let hrValues = fillGaps(hrBins.map { $0.isEmpty ? nil : $0.reduce(0, +) / Double($0.count) })
 
         guard !motionValues.isEmpty, motionValues.count == hrValues.count else { return [] }

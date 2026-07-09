@@ -162,7 +162,11 @@ final class WhoopScoringOrchestrator {
                     disturbances: nil,
                     restingHr: Int(todayRestingHR),
                     avgHrv: todayHRV,
-                    recovery: recovery.percentage,
+                    // FIXED: recovery.percentage is already 0-100 scale (RecoveryScorer computes
+                    // `* 100`), but DailyMetric.recovery is expected as a 0-1 FRACTION everywhere
+                    // it's read (TodayView, DayDetailView, TrendsView all do `recovery * 100` for
+                    // display) — storing the already-scaled value made 41% render as 4100%.
+                    recovery: recovery.percentage / 100,
                     strain: todayStrain,
                     exerciseCount: nil
                 )
