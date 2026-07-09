@@ -111,20 +111,21 @@ extension WhoopStore {
 
     // MARK: - Test helpers
 
-    public func storageStats_rowCountsForTest() async throws
-        -> (hr: Int, rr: Int, events: Int, battery: Int,
-            spo2: Int, skinTemp: Int, resp: Int, gravity: Int) {
-        try syncRead { db in
-            (try Int.fetchOne(db, sql: "SELECT COUNT(*) FROM hrSample") ?? 0,
-             try Int.fetchOne(db, sql: "SELECT COUNT(*) FROM rrInterval") ?? 0,
-             try Int.fetchOne(db, sql: "SELECT COUNT(*) FROM event") ?? 0,
-             try Int.fetchOne(db, sql: "SELECT COUNT(*) FROM battery") ?? 0,
-             try Int.fetchOne(db, sql: "SELECT COUNT(*) FROM spo2Sample") ?? 0,
-             try Int.fetchOne(db, sql: "SELECT COUNT(*) FROM skinTempSample") ?? 0,
-             try Int.fetchOne(db, sql: "SELECT COUNT(*) FROM respSample") ?? 0,
-             try Int.fetchOne(db, sql: "SELECT COUNT(*) FROM gravitySample") ?? 0)
-        }
+public func storageStats_rowCountsForTest() async throws
+    -> (hr: Int, rr: Int, events: Int, battery: Int,
+        spo2: Int, skinTemp: Int, resp: Int, gravity: Int) {
+    try syncRead { db in
+        let hr: Int = try Int.fetchOne(db, sql: "SELECT COUNT(*) FROM hrSample") ?? 0
+        let rr: Int = try Int.fetchOne(db, sql: "SELECT COUNT(*) FROM rrInterval") ?? 0
+        let events: Int = try Int.fetchOne(db, sql: "SELECT COUNT(*) FROM event") ?? 0
+        let battery: Int = try Int.fetchOne(db, sql: "SELECT COUNT(*) FROM battery") ?? 0
+        let spo2: Int = try Int.fetchOne(db, sql: "SELECT COUNT(*) FROM spo2Sample") ?? 0
+        let skinTemp: Int = try Int.fetchOne(db, sql: "SELECT COUNT(*) FROM skinTempSample") ?? 0
+        let resp: Int = try Int.fetchOne(db, sql: "SELECT COUNT(*) FROM respSample") ?? 0
+        let gravity: Int = try Int.fetchOne(db, sql: "SELECT COUNT(*) FROM gravitySample") ?? 0
+        return (hr, rr, events, battery, spo2, skinTemp, resp, gravity)
     }
+}
 
     public func deviceRowForTest(id: String) async throws -> (mac: String?, name: String?)? {
         try syncRead { db in
