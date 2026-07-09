@@ -26,6 +26,12 @@ final class WhoopScoringOrchestrator {
     private var todayRestingHR: Double = 50   // sensible default until baseline warms up
     private var todayMaxHR: Double = 190      // override with 220-age or a measured max
 
+    /// Set whenever runMorningPass/refreshTodayStrain hits an error, so a caller (e.g.
+    /// MetricsRepository) can surface it in the UI instead of it only going to the
+    /// debug console — important since there's no Mac/Xcode console available to watch
+    /// this live on-device.
+    private(set) var lastError: String?
+
     private static let dayFormatter: DateFormatter = {
         let f = DateFormatter()
         f.locale = Locale(identifier: "en_US_POSIX")
@@ -66,6 +72,7 @@ final class WhoopScoringOrchestrator {
 
     /// Call each morning (e.g. app becomes active, or a BGAppRefreshTask).
     func runMorningPass(now: Date = Date()) async {
+        lastError = nil
         let calendar = Calendar.current
         guard let windowStart = calendar.date(byAdding: .hour, value: -17, to: now) else { return }
         let fromTs = Int(windowStart.timeIntervalSince1970)
@@ -81,7 +88,8 @@ final class WhoopScoringOrchestrator {
             let wornRanges = WhoopDataAdapter.wornIntervals(from: eventRows)
 
             guard let sleepWindow = inferSleepWindow(hrSamples: hrSamples, wornRanges: wornRanges) else {
-                print("WhoopScoringOrchestrator: not enough data to infer last night's sleep window yet")
+                lastError = "No sleep window found — \(hrRows.count) HR rows, \(gravityRows.count) motion rows, \(eventRows.count) events in the last 17h"
+                print(lastError!)
                 return
             }
 
@@ -146,7 +154,8 @@ final class WhoopScoringOrchestrator {
 
             print("Morning pass complete — recovery: \(Int(recovery.percentage))% (\(recovery.band)), sleep: \(String(format: "%.1f", summary.totalSleepHours))h")
         } catch {
-            print("WhoopScoringOrchestrator: morning pass failed — \(error)")
+            lastError = "Morning pass failed: \(error)"
+            print(lastError!)
         }
     }
 

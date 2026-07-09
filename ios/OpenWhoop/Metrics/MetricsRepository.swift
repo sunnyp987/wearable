@@ -135,6 +135,9 @@ final class MetricsRepository: ObservableObject {
         // Local, on-device computation — the primary path now.
         await orchestrator?.runMorningPass()
         await orchestrator?.refreshTodayStrain()
+        if let orchestratorError = orchestrator?.lastError {
+            lastError = orchestratorError
+        }
 
         // Optional: only does anything if you've configured a server (WHOOP_BASE_URL/API key).
         await serverSync?.pullDerived()
