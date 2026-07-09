@@ -88,7 +88,16 @@ final class WhoopScoringOrchestrator {
             let wornRanges = WhoopDataAdapter.wornIntervals(from: eventRows)
 
             guard let sleepWindow = inferSleepWindow(hrSamples: hrSamples, wornRanges: wornRanges) else {
-                lastError = "No sleep window found — \(hrRows.count) HR rows, \(gravityRows.count) motion rows, \(eventRows.count) events in the last 17h"
+                let latestTs = try? await store.latestHRSampleTs(deviceId: deviceId)
+                let latestDateStr: String = {
+                    guard let ts = latestTs else { return "none stored" }
+                    let date = Date(timeIntervalSince1970: Double(ts))
+                    let fmt = DateFormatter()
+                    fmt.dateFormat = "yyyy-MM-dd HH:mm:ss 'UTC'"
+                    fmt.timeZone = TimeZone(identifier: "UTC")
+                    return fmt.string(from: date)
+                }()
+                lastError = "No sleep window found — \(hrRows.count) HR rows, \(gravityRows.count) motion rows, \(eventRows.count) events in the last 17h. Most recent stored HR sample overall: \(latestDateStr)"
                 print(lastError!)
                 return
             }
