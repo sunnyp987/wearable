@@ -24,11 +24,11 @@ final class WhoopScoringOrchestrator {
     /// Running strain accumulator for "today" — strain never decreases within a day.
     private(set) var todayStrain: Double = 0
     private var todayRestingHR: Double = 50   // sensible default until baseline warms up
-    private var todayMaxHR: Double            // Tanaka (208 − 0.7×age) from the local body
-                                               // profile when available; 190 default otherwise.
+    private var todayMaxHR: Double = 190      // override with 220-age or a measured max
 
-    /// Read-only accessors so other consumers (e.g. local workout auto-detection in
-    /// MetricsRepository) can reuse the same personalized HR baseline this orchestrator uses.
+    /// Read-only exposure of the current baselines, for other components (e.g.
+    /// local workout detection) that need a resting/max HR estimate without
+    /// duplicating the baseline-warming logic themselves.
     var currentRestingHR: Double { todayRestingHR }
     var currentMaxHR: Double { todayMaxHR }
 
@@ -49,16 +49,6 @@ final class WhoopScoringOrchestrator {
     init(store: WhoopStore, deviceId: String) {
         self.store = store
         self.deviceId = deviceId
-        self.todayMaxHR = Self.estimatedMaxHR()
-    }
-
-    /// Tanaka et al. 2001 (208 − 0.7×age) — a better-fit HRmax estimator than the classic
-    /// 220−age rule, used when the user has entered their age in Settings. Falls back to a
-    /// fixed 190 when no local profile exists yet (ProfileStorage is local-only UserDefaults,
-    /// so this works with no server configured).
-    private static func estimatedMaxHR() -> Double {
-        guard let age = ProfileStorage.load()?.age, age > 0 else { return 190 }
-        return 208.0 - 0.7 * Double(age)
     }
 
     /// Call once at app launch to restore rolling HRV/RHR baselines from the
@@ -151,16 +141,7 @@ final class WhoopScoringOrchestrator {
             )
 
             let todayHRV = baseline.hrvHistory.last?.rmssd
-            // The overnight RHR was just recorded into baseline.rhrHistory above (line ~112) —
-            // its most recent entry IS tonight's value. Passing it through fixes the recovery
-            // score's RHR component, which previously always evaluated to nil (see WhoopScoreEngine).
-            let overnightRHR = baseline.rhrHistory.last?.bpm
-            let recovery = RecoveryScorer.score(
-                todayHRVRmssd: todayHRV,
-                todayRestingHR: overnightRHR,
-                baseline: baseline,
-                lastNightSleep: sleepSession
-            )
+            let recovery = RecoveryScorer.score(todayHRVRmssd: todayHRV, baseline: baseline, lastNightSleep: sleepSession)
 
             todayStrain = 0  // reset the daily accumulator for the new day
 
@@ -220,34 +201,6 @@ final class WhoopScoringOrchestrator {
             guard !hrSamples.isEmpty else { return }
             let computed = StrainScorer.dailyStrain(hrSamples: hrSamples, restingHR: todayRestingHR, maxHR: todayMaxHR)
             todayStrain = max(todayStrain, computed)  // strain is monotonic within a day
-
-            // FIXED: this used to only update the in-memory `todayStrain` property, which
-            // nothing else ever read — MetricsRepository.load() reads the persisted dailyMetric
-            // row from the store, and runMorningPass() (which always runs right before this,
-            // in MetricsRepository.refresh()) writes that row with strain freshly reset to 0.
-            // Net effect: the UI's strain value was permanently stuck at 0 after every refresh.
-            // Fetch-merge-upsert so this write doesn't clobber the sleep/recovery/HRV fields
-            // runMorningPass already wrote for today.
-            let dayKey = Self.dayFormatter.string(from: now)
-            let existing = (try? await store.dailyMetrics(deviceId: deviceId, from: dayKey, to: dayKey))?.last
-            let merged = DailyMetric(
-                day: dayKey,
-                totalSleepMin: existing?.totalSleepMin,
-                efficiency: existing?.efficiency,
-                deepMin: existing?.deepMin,
-                remMin: existing?.remMin,
-                lightMin: existing?.lightMin,
-                disturbances: existing?.disturbances,
-                restingHr: existing?.restingHr,
-                avgHrv: existing?.avgHrv,
-                recovery: existing?.recovery,
-                strain: todayStrain,
-                exerciseCount: existing?.exerciseCount,
-                spo2Pct: existing?.spo2Pct,
-                skinTempDevC: existing?.skinTempDevC,
-                respRateBpm: existing?.respRateBpm
-            )
-            try? await store.upsertDailyMetrics([merged], deviceId: deviceId)
         } catch {
             print("WhoopScoringOrchestrator: strain refresh failed — \(error)")
         }
@@ -259,10 +212,42 @@ final class WhoopScoringOrchestrator {
         hrSamples: [ScoringHRSample],
         wornRanges: [(start: Date, end: Date)]
     ) -> (start: Date, end: Date)? {
-        guard let longest = wornRanges.max(by: { $0.end.timeIntervalSince($0.start) < $1.end.timeIntervalSince($1.start) }) else {
+        // FIXED: previously picked the single longest raw WRIST_ON/WRIST_OFF pair.
+        // In practice, overnight wear can fragment into MANY short pairs (skin-contact
+        // sensor blips, brief BLE disconnects/reconnects) — none individually as long
+        // as the true overnight span, so an unrelated short daytime blip could win.
+        // Merge pairs separated by a small gap (skin-contact noise, not real removal)
+        // into one continuous interval before picking the longest.
+        let mergeGapSeconds: TimeInterval = 30 * 60  // 30 min — generous enough to bridge
+                                                       // brief sensor/connectivity blips
+                                                       // without merging truly separate wears.
+        let merged = mergeNearbyIntervals(wornRanges, gap: mergeGapSeconds)
+
+        guard let longest = merged.max(by: { $0.end.timeIntervalSince($0.start) < $1.end.timeIntervalSince($1.start) }) else {
             guard let first = hrSamples.first?.timestamp, let last = hrSamples.last?.timestamp, last > first else { return nil }
             return (start: first, end: last)
         }
         return longest
+    }
+
+    /// Merge intervals that are separated by less than `gap`, treating them as one
+    /// continuous span. Input need not be pre-sorted.
+    private func mergeNearbyIntervals(
+        _ intervals: [(start: Date, end: Date)],
+        gap: TimeInterval
+    ) -> [(start: Date, end: Date)] {
+        guard !intervals.isEmpty else { return [] }
+        let sorted = intervals.sorted { $0.start < $1.start }
+        var result: [(start: Date, end: Date)] = [sorted[0]]
+        for interval in sorted.dropFirst() {
+            let lastIndex = result.count - 1
+            if interval.start.timeIntervalSince(result[lastIndex].end) <= gap {
+                // Extend the previous interval rather than starting a new one.
+                result[lastIndex].end = max(result[lastIndex].end, interval.end)
+            } else {
+                result.append(interval)
+            }
+        }
+        return result
     }
 }
