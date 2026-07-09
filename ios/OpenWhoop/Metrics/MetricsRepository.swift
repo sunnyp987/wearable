@@ -236,7 +236,39 @@ final class MetricsRepository: ObservableObject {
 
     func workouts(from: String, to: String) async -> [Workout] {
         await ensureOpen()
-        return await serverSync?.getWorkouts(from: from, to: to) ?? []
+        guard let store else { return [] }
+
+        // Convert the YYYY-MM-DD day-string range into epoch bounds (UTC), matching
+        // the day-key convention used elsewhere (e.g. WhoopScoringOrchestrator).
+        let fmt = DateFormatter()
+        fmt.calendar = Calendar(identifier: .gregorian)
+        fmt.timeZone = TimeZone(identifier: "UTC")
+        fmt.dateFormat = "yyyy-MM-dd"
+        guard let fromDate = fmt.date(from: from),
+              let toDateStart = fmt.date(from: to),
+              let toDate = Calendar(identifier: .gregorian).date(byAdding: .day, value: 1, to: toDateStart)
+        else { return [] }
+
+        let fromTs = Int(fromDate.timeIntervalSince1970)
+        let toTs = Int(toDate.timeIntervalSince1970)
+
+        let hrRows = (try? await store.hrSamples(deviceId: deviceId, from: fromTs, to: toTs, limit: 500_000)) ?? []
+        let hrSamples = WhoopDataAdapter.scoringHRSamples(from: hrRows)
+
+        let restingHR = orchestrator?.currentRestingHR ?? 55
+        let maxHR = orchestrator?.currentMaxHR ?? 190
+        let localWorkouts = WorkoutDetector.detect(
+            hrSamples: hrSamples, deviceId: deviceId, restingHR: restingHR, maxHR: maxHR
+        )
+
+        // Merge with server-detected workouts if a server happens to be configured
+        // (harmless no-op otherwise) — local-first union by id, since local detection
+        // is always available and the server path may not be.
+        let serverWorkouts = await serverSync?.getWorkouts(from: from, to: to) ?? []
+        var byId: [String: Workout] = [:]
+        for w in localWorkouts { byId[w.id] = w }
+        for w in serverWorkouts where byId[w.id] == nil { byId[w.id] = w }
+        return byId.values.sorted { $0.startTs < $1.startTs }
     }
 
     // MARK: - Workout calorie backfill (M7)

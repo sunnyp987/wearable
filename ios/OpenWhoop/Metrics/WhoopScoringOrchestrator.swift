@@ -26,6 +26,12 @@ final class WhoopScoringOrchestrator {
     private var todayRestingHR: Double = 50   // sensible default until baseline warms up
     private var todayMaxHR: Double = 190      // override with 220-age or a measured max
 
+    /// Read-only exposure of the current baselines, for other components (e.g.
+    /// local workout detection) that need a resting/max HR estimate without
+    /// duplicating the baseline-warming logic themselves.
+    var currentRestingHR: Double { todayRestingHR }
+    var currentMaxHR: Double { todayMaxHR }
+
     /// Set whenever runMorningPass/refreshTodayStrain hits an error, so a caller (e.g.
     /// MetricsRepository) can surface it in the UI instead of it only going to the
     /// debug console — important since there's no Mac/Xcode console available to watch
@@ -206,10 +212,42 @@ final class WhoopScoringOrchestrator {
         hrSamples: [ScoringHRSample],
         wornRanges: [(start: Date, end: Date)]
     ) -> (start: Date, end: Date)? {
-        guard let longest = wornRanges.max(by: { $0.end.timeIntervalSince($0.start) < $1.end.timeIntervalSince($1.start) }) else {
+        // FIXED: previously picked the single longest raw WRIST_ON/WRIST_OFF pair.
+        // In practice, overnight wear can fragment into MANY short pairs (skin-contact
+        // sensor blips, brief BLE disconnects/reconnects) — none individually as long
+        // as the true overnight span, so an unrelated short daytime blip could win.
+        // Merge pairs separated by a small gap (skin-contact noise, not real removal)
+        // into one continuous interval before picking the longest.
+        let mergeGapSeconds: TimeInterval = 30 * 60  // 30 min — generous enough to bridge
+                                                       // brief sensor/connectivity blips
+                                                       // without merging truly separate wears.
+        let merged = mergeNearbyIntervals(wornRanges, gap: mergeGapSeconds)
+
+        guard let longest = merged.max(by: { $0.end.timeIntervalSince($0.start) < $1.end.timeIntervalSince($1.start) }) else {
             guard let first = hrSamples.first?.timestamp, let last = hrSamples.last?.timestamp, last > first else { return nil }
             return (start: first, end: last)
         }
         return longest
+    }
+
+    /// Merge intervals that are separated by less than `gap`, treating them as one
+    /// continuous span. Input need not be pre-sorted.
+    private func mergeNearbyIntervals(
+        _ intervals: [(start: Date, end: Date)],
+        gap: TimeInterval
+    ) -> [(start: Date, end: Date)] {
+        guard !intervals.isEmpty else { return [] }
+        let sorted = intervals.sorted { $0.start < $1.start }
+        var result: [(start: Date, end: Date)] = [sorted[0]]
+        for interval in sorted.dropFirst() {
+            let lastIndex = result.count - 1
+            if interval.start.timeIntervalSince(result[lastIndex].end) <= gap {
+                // Extend the previous interval rather than starting a new one.
+                result[lastIndex].end = max(result[lastIndex].end, interval.end)
+            } else {
+                result.append(interval)
+            }
+        }
+        return result
     }
 }
