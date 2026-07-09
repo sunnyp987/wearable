@@ -800,6 +800,10 @@ extension BLEManager: CBPeripheralDelegate {
                 if frame.count > 4 {
                     log("Custom channel frame: type=\(frame[4]) len=\(frame.count)")
                 }
+                let parsed = parseFrame(frame)
+                if frame.count > 4, frame[4] == 36 {
+                    log("COMMAND_RESPONSE: cmd=\(parsed.cmdName ?? "nil") clockPresent=\(parsed.parsed["clock"] != nil) fieldCount=\(parsed.parsed.count)")
+                }
                 if frame.count > 6, frame[6] == WhoopCommand.getDataRange.rawValue,
                    let newest = BLEManager.dataRangeNewestUnix(from: frame) {
                     strapNewestTs = newest                        // feeds the liveness watchdog
@@ -811,7 +815,6 @@ extension BLEManager: CBPeripheralDelegate {
                 // Clock correlation runs in both live and backfill modes. Once established it
                 // unblocks both the Collector (live path) and the Backfiller (chunk decoding).
                 if clockRef == nil {
-                    let parsed = parseFrame(frame)
                     if let ref = ClockCorrelation.clockRef(from: parsed, wall: Int(Date().timeIntervalSince1970)) {
                         clockRef = ref
                         collector?.clockRef = ref                  // unblocks buffered persistence
