@@ -249,9 +249,9 @@ public final class BLEManager: NSObject, ObservableObject {
     ///
     /// High-freq-sync ack form (matches re/sync_openwhoop.py, which pulled 762 type-47 records):
     /// HISTORICAL_DATA_RESULT(23) payload = `[0x01] + end_data`, where end_data is the verbatim
-    /// 8 bytes of the HISTORY_END metadata.data[10:18] (trim u32 at [10:14] + next u32 at [14:18]).
-    /// The `trim` argument (= end_data first u32) is already persisted as the strap_trim cursor by
-    /// the Backfiller; it is passed here only for logging.
+    /// 8 bytes of the HISTORY_END metadata.data[10:18]. The `trim` argument (= end_data first u32)
+    /// is already persisted as the strap_trim cursor by the Backfiller; it is passed here only for
+    /// logging.
     func ackHistoricalChunk(trim: UInt32, endData: [UInt8]) {
         send(.historicalDataResult, payload: [0x01] + endData, writeType: .withResponse)
     }
@@ -800,6 +800,10 @@ extension BLEManager: CBPeripheralDelegate {
                 if frame.count > 6, frame[6] == WhoopCommand.getDataRange.rawValue,
                    let newest = BLEManager.dataRangeNewestUnix(from: frame) {
                     strapNewestTs = newest                        // feeds the liveness watchdog
+                    let date = Date(timeIntervalSince1970: TimeInterval(newest))
+                    let fmt = DateFormatter()
+                    fmt.dateFormat = "yyyy-MM-dd HH:mm:ss"
+                    log("Strap reports newest record at: \(fmt.string(from: date)) (raw=\(newest))")
                 }
                 // Clock correlation runs in both live and backfill modes. Once established it
                 // unblocks both the Collector (live path) and the Backfiller (chunk decoding).
