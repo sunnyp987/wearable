@@ -42,4 +42,4 @@ jobs:
             -scheme OpenWhoop \
             -destination 'generic/platform=iOS Simulator' \
             CODE_SIGNING_ALLOWED=NO \
-            | xcpretty || true
+            | xcpretty && exit ${PIPESTATUS[0]}
