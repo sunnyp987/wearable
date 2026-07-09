@@ -732,23 +732,42 @@ extension BLEManager: CBPeripheralDelegate {
         // then offload. Hello is NOT strictly required to serve — verified on this strap via the Mac
         // ground-truth test: plain SEND_HISTORICAL_DATA serves type-47 with no hello and no high-freq-sync
         // (PHASE A = 50 records; PHASE B high-freq = 0). We still exchange hello to mirror WHOOP exactly.
+        //
+        // FIX: these were previously all fired synchronously in the same instant. Diagnostic logging
+        // showed only the LAST couple of a 6-command burst ever got a response — GET_CLOCK, GET_HELLO,
+        // and GET_ADVERTISING_NAME were silently dropped, most likely because six .withoutResponse
+        // writes fired back-to-back overran the strap's BLE receive buffer with no delivery
+        // confirmation to catch it. Staggering each send with a small delay gives the strap time to
+        // actually process each command before the next arrives.
         send(.getHelloHarvard)
-        send(.getAdvertisingNameHarvard)
-        send(.setClock, payload: BLEManager.setClockPayload())
-        if clockRef == nil && !clockRequested {
-            clockRequested = true
-            send(.getClock, payload: [])   // the strap expects GET_CLOCK with an EMPTY payload;
-                                           // the app's old default [0x00] is a wrong length the strap ignores.
-                                           // (Offload no longer depends on this — Backfiller falls back to an
-                                           // identity clockRef — but a real correlation helps realtime decode.)
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.15) { [weak self] in
+            self?.send(.getAdvertisingNameHarvard)
         }
-        send(.sendR10R11Realtime, payload: [0x00])   // stop the type-43 realtime flood (BLE airtime/battery)
-        send(.getDataRange)                          // refresh the strap's stored range for the watchdog
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.30) { [weak self] in
+            self?.send(.setClock, payload: BLEManager.setClockPayload())
+        }
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.45) { [weak self] in
+            guard let self else { return }
+            if self.clockRef == nil && !self.clockRequested {
+                self.clockRequested = true
+                self.send(.getClock, payload: [])   // the strap expects GET_CLOCK with an EMPTY payload;
+                                               // the app's old default [0x00] is a wrong length the strap ignores.
+                                               // (Offload no longer depends on this — Backfiller falls back to an
+                                               // identity clockRef — but a real correlation helps realtime decode.)
+            }
+        }
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.60) { [weak self] in
+            self?.send(.sendR10R11Realtime, payload: [0x00])   // stop the type-43 realtime flood (BLE airtime/battery)
+        }
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.75) { [weak self] in
+            self?.send(.getDataRange)                          // refresh the strap's stored range for the watchdog
+        }
         // Plain offload (no high-freq-sync), rate-limited (first connect always runs; reconnect-flaps are
-        // throttled by BackfillPolicy). Deferred ~1.5s so SET_CLOCK/GET_DATA_RANGE round-trip first and
+        // throttled by BackfillPolicy). Deferred so SET_CLOCK/GET_DATA_RANGE round-trip first and
         // SEND_HISTORICAL runs on a settled link, like the paced Mac prototype. beginBackfill is itself
         // gated on connectHandshakeDone so a racing foreground/restore trigger can't fire it early.
-        DispatchQueue.main.asyncAfter(deadline: .now() + 1.5) { [weak self] in self?.requestSync(.connect) }
+        // (Bumped from 1.5s to 2.0s since the handshake above is now staggered across ~0.75s.)
+        DispatchQueue.main.asyncAfter(deadline: .now() + 2.0) { [weak self] in self?.requestSync(.connect) }
         uploadOpportunistically()
         // NOTE: the server pull + cloud-restore are deliberately NOT kicked here. They share the
         // WhoopStore actor with the historical offload, and a large first-run pull would starve the
