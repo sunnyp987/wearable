@@ -18,6 +18,14 @@ jobs:
       - name: Install XcodeGen
         run: brew install xcodegen
 
+      - name: Create Secrets.xcconfig (empty — no server configured, fully local)
+        run: |
+          cat > ios/OpenWhoop/Config/Secrets.xcconfig << 'EOF'
+          WHOOP_BASE_URL =
+          WHOOP_API_KEY =
+          WHOOP_DEVICE_ID = my-whoop
+          EOF
+
       - name: Generate Xcode project
         run: |
           cd ios
