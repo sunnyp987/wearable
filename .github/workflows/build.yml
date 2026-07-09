@@ -43,3 +43,31 @@ jobs:
             -destination 'generic/platform=iOS Simulator' \
             CODE_SIGNING_ALLOWED=NO \
             | xcpretty && exit ${PIPESTATUS[0]}
+
+      - name: Archive for a real device (still unsigned)
+        run: |
+          cd ios
+          xcodebuild archive \
+            -project OpenWhoop.xcodeproj \
+            -scheme OpenWhoop \
+            -configuration Release \
+            -archivePath build/OpenWhoop.xcarchive \
+            -sdk iphoneos \
+            -destination 'generic/platform=iOS' \
+            CODE_SIGNING_ALLOWED=NO \
+            CODE_SIGNING_REQUIRED=NO \
+            AD_HOC_CODE_SIGNING_ALLOWED=YES \
+            | xcpretty && exit ${PIPESTATUS[0]}
+
+      - name: Package the .ipa (Payload/OpenWhoop.app zipped)
+        run: |
+          cd ios/build
+          mkdir Payload
+          cp -r OpenWhoop.xcarchive/Products/Applications/OpenWhoop.app Payload/
+          zip -r OpenWhoop.ipa Payload
+
+      - name: Upload .ipa as a workflow artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: OpenWhoop-ipa
+          path: ios/build/OpenWhoop.ipa
